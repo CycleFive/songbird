@@ -70,7 +70,7 @@ impl UdpRx {
                         Err(flume::RecvError::Disconnected) => break,
                     }
                 },
-                _ = tokio::time::sleep_until(playout_time) => {
+                () = tokio::time::sleep_until(playout_time) => {
                     let mut tick = VoiceTick {
                         speaking: HashMap::new(),
                         silent: HashSet::new(),

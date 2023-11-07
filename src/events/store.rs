@@ -57,10 +57,7 @@ impl EventStore {
 
         match evt.event {
             Event::Core(c) => {
-                self.untimed
-                    .entry(c.into())
-                    .or_insert_with(Vec::new)
-                    .push(evt);
+                self.untimed.entry(c.into()).or_default().push(evt);
             },
             Event::Track(t) => {
                 self.untimed

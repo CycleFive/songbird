@@ -161,7 +161,7 @@ impl Idle {
                 let task = loop_task.take().unwrap();
                 let (worker, idx) = self.fetch_worker(&task, avoid);
                 match worker.schedule_mixer(id, task) {
-                    Ok(_) => {
+                    Ok(()) => {
                         self.stats.move_mixer_to_live();
                         break;
                     },
