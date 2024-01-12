@@ -140,7 +140,7 @@ impl<'a> YoutubeDl<'a> {
             "--no-playlist",
         ];
 
-        let mut output = Command::new(self.program)
+        let output = Command::new(self.program)
             .args(self.user_args.clone())
             .args(ytdl_args)
             .output()
