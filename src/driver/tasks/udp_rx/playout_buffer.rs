@@ -158,7 +158,6 @@ impl PlayoutBuffer {
                 if ts_diff >= 0 {
                     // At or before expected timestamp.
                     self.next_seq = (rtp.get_sequence() + 1).0;
-
                     PacketLookup::Packet(pkt)
                 } else if ts_diff <= -skip_after {
                     // >5 playouts ahead.
@@ -166,7 +165,12 @@ impl PlayoutBuffer {
                     *curr_ts = pkt_ts;
                     PacketLookup::Packet(pkt)
                 } else {
-                    trace!("Witholding packet: ts_diff is {ts_diff}");
+                    trace!(
+                        "Withholding packet({}): ts_diff is {ts_diff}.\
+                        Expected >={curr_ts}, have {pkt_ts} (seq {}).",
+                        rtp.get_ssrc(),
+                        rtp.get_sequence().0,
+                    );
                     self.buffer.push_front(Some(pkt));
                     self.playout_mode = PlayoutMode::Fill;
                     PacketLookup::Filling
