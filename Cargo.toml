@@ -40,7 +40,7 @@ pin-project = "1"
 rand = { optional = true, version = "0.9" }
 reqwest = { default-features = false, features = [
     "stream",
-], optional = true, version = "0.12.2" }
+], optional = true, version = "0.13" }
 ringbuf = { optional = true, version = "0.4" }
 rubato = { optional = true, version = "0.16" }
 rusty_pool = { optional = true, version = "0.7" }
@@ -135,7 +135,7 @@ driver = [
     "tokio?/time",
 ]
 rustls = [
-    "reqwest?/rustls-tls",
+    "reqwest?/rustls",
     "serenity?/rustls_backend",
     "stream_lib?/rustls-tls",
     "tokio-tungstenite?/rustls-tls-webpki-roots",
