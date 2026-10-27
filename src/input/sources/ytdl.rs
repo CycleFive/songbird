@@ -15,6 +15,7 @@ use reqwest::{
 use std::{
     borrow::Cow,
     error::Error,
+    fmt,
     io::ErrorKind,
     time::{Duration, Instant, SystemTime},
 };
@@ -49,10 +50,20 @@ const MAX_RESOLVED_AGE: Duration = Duration::from_secs(30 * 60);
 
 /// The first result of the last [`YoutubeDl::query`], kept so that opening
 /// the stream need not run yt-dlp a second time.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Resolved {
     output: YoutubeDlOutput,
     at: Instant,
+}
+
+// Leaves out the output: its signed stream URL (YouTube's carries the
+// client's IP address) has no place in a caller's `{:?}` log line.
+impl fmt::Debug for Resolved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Resolved")
+            .field("at", &self.at)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Resolved {
@@ -412,6 +423,19 @@ mod tests {
         assert_eq!(fake.runs(), 1);
         assert!(ytdl.create_async().await.is_err());
         assert_eq!(fake.runs(), 1, "opening ran yt-dlp again");
+    }
+
+    /// Callers log a `YoutubeDl` with `{:?}`. The kept resolve holds a signed
+    /// stream URL, and YouTube's carries the client's IP address.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ntest::timeout(20_000)]
+    async fn debug_output_leaves_out_the_stream_url() {
+        let fake = FakeYtdl::new("debug");
+        let mut ytdl = YoutubeDl::new_ytdl_like(&fake.program, Client::new(), "unused");
+
+        ytdl.aux_metadata().await.unwrap();
+        assert!(!format!("{ytdl:?}").contains("127.0.0.1:9"));
     }
 
     #[cfg(unix)]
