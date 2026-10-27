@@ -12,7 +12,12 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
     Client,
 };
-use std::{borrow::Cow, error::Error, io::ErrorKind, time::SystemTime};
+use std::{
+    borrow::Cow,
+    error::Error,
+    io::ErrorKind,
+    time::{Duration, Instant, SystemTime},
+};
 use symphonia_core::io::MediaSource;
 use tokio::process::Command;
 
@@ -36,6 +41,26 @@ impl<'a> QueryType<'a> {
     }
 }
 
+/// How long a resolve made for metadata is reused to open the stream.
+///
+/// YouTube's stream URLs last six hours; other sites' signed URLs may not, and
+/// one that has expired anyway is refused and re-resolved by the next open.
+const MAX_RESOLVED_AGE: Duration = Duration::from_secs(30 * 60);
+
+/// The first result of the last [`YoutubeDl::query`], kept so that opening
+/// the stream need not run yt-dlp a second time.
+#[derive(Clone, Debug)]
+struct Resolved {
+    output: YoutubeDlOutput,
+    at: Instant,
+}
+
+impl Resolved {
+    fn is_fresh(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.at) < MAX_RESOLVED_AGE
+    }
+}
+
 /// A lazily instantiated call to download a file, finding its URL via youtube-dl.
 ///
 /// By default, this uses yt-dlp and is backed by an [`HttpRequest`]. This handler
@@ -48,6 +73,7 @@ pub struct YoutubeDl<'a> {
     program: &'a str,
     client: Client,
     metadata: Option<AuxMetadata>,
+    resolved: Option<Resolved>,
     query: QueryType<'a>,
     user_args: Vec<String>,
 }
@@ -71,6 +97,7 @@ impl<'a> YoutubeDl<'a> {
             program,
             client,
             metadata: None,
+            resolved: None,
             query: QueryType::Url(url.into()),
             user_args: Vec::new(),
         }
@@ -95,6 +122,7 @@ impl<'a> YoutubeDl<'a> {
             program,
             client,
             metadata: None,
+            resolved: None,
             query: QueryType::Search(query.into()),
             user_args: Vec::new(),
         }
@@ -179,6 +207,10 @@ impl<'a> YoutubeDl<'a> {
             .as_aux_metadata();
 
         self.metadata = Some(meta);
+        self.resolved = out.first().cloned().map(|output| Resolved {
+            output,
+            at: Instant::now(),
+        });
 
         Ok(out)
     }
@@ -239,11 +271,19 @@ impl Compose for YoutubeDl<'_> {
     async fn create_async(
         &mut self,
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
-        // panic safety: `query` should have ensured > 0 results if `Ok`
-        let mut results = self.query(1).await?;
-        let result = results.swap_remove(0);
+        // Reuse the resolve that fetched the metadata, once: a second open (a
+        // retry after a refusal) always asks yt-dlp for a fresh URL.
+        let resolved = match self.resolved.take() {
+            Some(resolved) if resolved.is_fresh(Instant::now()) => resolved,
+            _ => {
+                self.query(1).await?;
+                self.resolved
+                    .take()
+                    .ok_or_else(|| AudioStreamError::Fail("yt-dlp returned no results".into()))?
+            },
+        };
 
-        self.get_stream(&result).await
+        self.get_stream(&resolved.output).await
     }
 
     fn should_create_async(&self) -> bool {
@@ -317,6 +357,114 @@ mod tests {
         let start = Instant::now();
         assert!(ytdl.get_stream(&output).await.is_err());
         assert!(start.elapsed() >= Duration::from_millis(400));
+    }
+
+    /// A stand-in for yt-dlp: prints one result whose URL points at a closed
+    /// port, so opening it fails at once, and counts its runs.
+    #[cfg(unix)]
+    struct FakeYtdl {
+        program: String,
+    }
+
+    #[cfg(unix)]
+    impl FakeYtdl {
+        fn new(name: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+
+            let program = std::env::temp_dir()
+                .join(format!("songbird-fake-ytdl-{}-{name}", std::process::id()))
+                .to_str()
+                .unwrap()
+                .to_owned();
+            std::fs::write(
+                &program,
+                "#!/bin/sh\necho run >> \"$0.runs\"\necho '{\"url\":\"http://127.0.0.1:9/\",\"title\":\"t\"}'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_file(format!("{program}.runs"));
+
+            Self { program }
+        }
+
+        fn runs(&self) -> usize {
+            std::fs::read_to_string(format!("{}.runs", self.program))
+                .map_or(0, |runs| runs.lines().count())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeYtdl {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.program);
+            let _ = std::fs::remove_file(format!("{}.runs", self.program));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ntest::timeout(20_000)]
+    async fn opening_reuses_the_metadata_resolve() {
+        let fake = FakeYtdl::new("reuse");
+        let mut ytdl = YoutubeDl::new_ytdl_like(&fake.program, Client::new(), "unused");
+
+        ytdl.aux_metadata().await.unwrap();
+        assert_eq!(fake.runs(), 1);
+        assert!(ytdl.create_async().await.is_err());
+        assert_eq!(fake.runs(), 1, "opening ran yt-dlp again");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ntest::timeout(20_000)]
+    async fn a_second_open_resolves_afresh() {
+        let fake = FakeYtdl::new("retry");
+        let mut ytdl = YoutubeDl::new_ytdl_like(&fake.program, Client::new(), "unused");
+
+        ytdl.aux_metadata().await.unwrap();
+        assert!(ytdl.create_async().await.is_err());
+        assert!(ytdl.create_async().await.is_err());
+        assert_eq!(fake.runs(), 2, "a retry must not reuse a refused URL");
+    }
+
+    #[test]
+    fn a_resolve_is_reused_for_thirty_minutes() {
+        let at = Instant::now();
+        let resolved = Resolved {
+            output: serde_json::from_str(r#"{"url":"u"}"#).unwrap(),
+            at,
+        };
+
+        assert!(resolved.is_fresh(at));
+        assert!(resolved.is_fresh(at + Duration::from_secs(30 * 60 - 1)));
+        assert!(!resolved.is_fresh(at + MAX_RESOLVED_AGE));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ntest::timeout(20_000)]
+    async fn a_stale_resolve_is_resolved_again() {
+        let fake = FakeYtdl::new("stale");
+        let mut ytdl = YoutubeDl::new_ytdl_like(&fake.program, Client::new(), "unused");
+        ytdl.aux_metadata().await.unwrap();
+        let Some(long_ago) = Instant::now().checked_sub(MAX_RESOLVED_AGE) else {
+            return; // the clock started too recently to backdate
+        };
+        ytdl.resolved.as_mut().unwrap().at = long_ago;
+
+        assert!(ytdl.create_async().await.is_err());
+        assert_eq!(fake.runs(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ntest::timeout(20_000)]
+    async fn opening_without_metadata_resolves_once() {
+        let fake = FakeYtdl::new("cold");
+        let mut ytdl = YoutubeDl::new_ytdl_like(&fake.program, Client::new(), "unused");
+
+        assert!(ytdl.create_async().await.is_err());
+        assert_eq!(fake.runs(), 1);
     }
 
     #[tokio::test]

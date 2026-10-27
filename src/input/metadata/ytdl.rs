@@ -8,14 +8,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// The longest [`Output::time_until_available`] asks a caller to wait, so a
-/// bogus or far-future `available_at` cannot stall a track indefinitely.
-pub const MAX_AVAILABILITY_WAIT: Duration = Duration::from_secs(30);
+/// The longest [`Output::time_until_available`] asks a caller to wait.
+const MAX_AVAILABILITY_WAIT: Duration = Duration::from_secs(30);
 
 /// Information returned by yt-dlp about a URL.
 ///
 /// Returned by [`crate::input::YoutubeDl::query`].
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct Output {
     /// The main artist.
     pub artist: Option<String>,
@@ -57,7 +56,8 @@ pub struct Output {
 
 impl Output {
     /// How long to wait before fetching [`Self::url`], if at all, measured
-    /// from `now` and capped at [`MAX_AVAILABILITY_WAIT`].
+    /// from `now` and capped at 30 s, so a bogus or far-future `available_at`
+    /// cannot stall a track indefinitely.
     #[must_use]
     pub fn time_until_available(&self, now: SystemTime) -> Option<Duration> {
         let opens =
